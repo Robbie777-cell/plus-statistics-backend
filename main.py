@@ -1,19 +1,16 @@
-"""
-backend/main.py
-FastAPI — servidor principal de +Statistics
-"""
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import pandas as pd
 import numpy as np
 import io
-import json
-from datetime import datetime
-from typing import Optional
+import os
 
-from core.signal_processing import preprocess_accelerometer, detect_steps
-from core.biomechanics import analyze_session, SessionMetrics
+from .core.signal_processing import SignalProcessor
+from .core.biomechanics import BiomechanicsAnalyzer
+from .services.ml_engine import MLEngine
+from .db.database import create_tables
+from .api.auth_routes import router as auth_router
+from .api.session_routes import router as sessions_router
 
 app = FastAPI(
     title="+Statistics API",
@@ -23,231 +20,103 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción: lista de dominios permitidos
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────
-# CONFIGURACIÓN DE DISPOSITIVOS
-# ─────────────────────────────────────────────
-DEVICE_POSITIONS = {
-    "Pecho / Arnés":        {"gss_good": (0, 3),  "gss_warn": (3, 6)},
-    "Brazo / Muñeca":       {"gss_good": (1, 4),  "gss_warn": (4, 8)},
-    "Bolsillo / Cintura":   {"gss_good": (2, 6),  "gss_warn": (6, 10)},
-    "Espalda / Canguro":    {"gss_good": (4, 9),  "gss_warn": (9, 13)},
-    "Mano (sostenido)":     {"gss_good": (3, 8),  "gss_warn": (8, 14)},
-}
+# Crear tablas al iniciar
+@app.on_event("startup")
+def startup():
+    create_tables()
 
-# ─────────────────────────────────────────────
-# ENDPOINTS
-# ─────────────────────────────────────────────
+# Routers
+app.include_router(auth_router)
+app.include_router(sessions_router)
+
+processor = SignalProcessor()
+analyzer = BiomechanicsAnalyzer()
+ml_engine = MLEngine()
 
 @app.get("/")
 def root():
     return {"status": "ok", "app": "+Statistics API", "version": "2.0.0"}
 
-
 @app.get("/devices")
 def get_devices():
-    """Lista de posiciones de dispositivo disponibles."""
-    return {"devices": list(DEVICE_POSITIONS.keys())}
-
+    return {
+        "positions": ["Espalda / Canguro", "Muñeca", "Tobillo"],
+        "supported_sensors": ["Accelerometer", "Gyroscope", "Location"]
+    }
 
 @app.post("/analyze")
 async def analyze(
-    accel_file: UploadFile = File(...),
-    gps_file: Optional[UploadFile] = File(None),
-    device: str = "Espalda / Canguro",
+    accelerometer: UploadFile = File(...),
+    location: UploadFile = File(None)
 ):
-    """
-    Analiza una sesión de carrera.
-    Recibe CSV de acelerómetro (obligatorio) y GPS (opcional).
-    """
     try:
-        # Leer acelerómetro
-        accel_bytes = await accel_file.read()
-        accel_df = pd.read_csv(io.StringIO(accel_bytes.decode("utf-8", errors="replace")))
+        acc_content = await accelerometer.read()
+        acc_df = pd.read_csv(io.StringIO(acc_content.decode("utf-8")))
+
+        loc_df = None
+        if location:
+            loc_content = await location.read()
+            loc_df = pd.read_csv(io.StringIO(loc_content.decode("utf-8")))
+
+        acc_clean = processor.process_accelerometer(acc_df)
+        metrics = analyzer.analyze(acc_clean, loc_df)
+
+        return {"status": "success", "metrics": metrics}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error leyendo acelerómetro: {str(e)}")
-
-    # Leer GPS si viene
-    gps_df = None
-    if gps_file:
-        try:
-            gps_bytes = await gps_file.read()
-            gps_df = pd.read_csv(io.StringIO(gps_bytes.decode("utf-8", errors="replace")))
-            gps_df.columns = [c.strip().lower() for c in gps_df.columns]
-        except Exception:
-            gps_df = None
-
-    # Configuración del dispositivo
-    device_config = DEVICE_POSITIONS.get(device, DEVICE_POSITIONS["Espalda / Canguro"])
-    device_config = {**device_config, "name": device}
-
-    try:
-        # Pipeline de análisis
-        accel_clean = preprocess_accelerometer(accel_df)
-        peaks, peak_times, peak_values = detect_steps(accel_clean)
-
-        if len(peaks) < 10:
-            raise HTTPException(status_code=422, detail="No se detectaron suficientes pisadas. Verifica el archivo CSV.")
-
-        metrics = analyze_session(
-            accel=accel_clean,
-            peak_times=peak_times,
-            peak_values=peak_values,
-            gps=gps_df,
-            device_config=device_config,
-        )
-
-        return _metrics_to_response(metrics)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en análisis: {str(e)}")
-
+        raise HTTPException(status_code=422, detail=str(e))
 
 @app.post("/analyze/demo")
-async def analyze_demo(device: str = "Espalda / Canguro"):
-    """Analiza con datos de demostración."""
-    from core.signal_processing import preprocess_accelerometer, detect_steps
-    import pandas as pd
-    import numpy as np
+def analyze_demo():
+    try:
+        t = np.linspace(0, 600, 6000)
+        acc_df = pd.DataFrame({
+            "time": t,
+            "x": np.sin(2 * np.pi * 3 * t) * 0.8 + np.random.normal(0, 0.05, len(t)),
+            "y": np.cos(2 * np.pi * 3 * t) * 1.2 + np.random.normal(0, 0.05, len(t)),
+            "z": np.sin(2 * np.pi * 3 * t + 0.5) * 0.6 + np.random.normal(0, 0.05, len(t))
+        })
+        loc_df = pd.DataFrame({
+            "time": np.linspace(0, 600, 100),
+            "velocity": np.random.normal(3.0, 0.3, 100)
+        })
 
-    # Generar datos demo
-    duration = 600
-    fs = 100
-    t = np.linspace(0, duration, duration * fs)
-    np.random.seed(42)
-    fatigue = np.linspace(1.0, 1.4, len(t))
-    cadence_hz = 2.83
-
-    z = np.sin(2 * np.pi * cadence_hz * t) * 0.8 * fatigue + np.random.normal(0, 0.15, len(t)) + 9.81
-    x = np.sin(2 * np.pi * cadence_hz * t + np.pi/4) * 0.3 * fatigue + np.random.normal(0, 0.1, len(t))
-    y = np.sin(2 * np.pi * cadence_hz * t + np.pi/2) * 0.15 + np.random.normal(0, 0.08, len(t))
-
-    accel_df = pd.DataFrame({"time": t, "x": x, "y": y, "z": z})
-    gps_t = np.arange(0, duration, 1)
-    gps_df = pd.DataFrame({"time": gps_t, "speed": 3.0 + 0.5 * np.sin(2 * np.pi * gps_t / 120)})
-
-    device_config = {**DEVICE_POSITIONS.get(device, DEVICE_POSITIONS["Espalda / Canguro"]), "name": device}
-
-    accel_clean = preprocess_accelerometer(accel_df)
-    peaks, peak_times, peak_values = detect_steps(accel_clean)
-    metrics = analyze_session(accel_clean, peak_times, peak_values, gps_df, device_config)
-
-    return _metrics_to_response(metrics)
-
-
-def _metrics_to_response(m: SessionMetrics) -> dict:
-    """Serializa SessionMetrics a dict JSON."""
-    return {
-        "date": datetime.now().isoformat(),
-        "duration": round(m.duration, 1),
-        "steps": m.steps,
-        "device": m.device,
-
-        # Métricas base
-        "rei": m.rei,
-        "gss": m.gss,
-        "cadence": m.cadence,
-        "asymmetry": m.asymmetry,
-        "speed": round(m.speed, 2),
-        "pace_min_km": m.pace_min_km,
-        "gps_available": m.gps_available,
-
-        # Fatigue
-        "fi_times": m.fi_times,
-        "fi_values": m.fi_values,
-        "fatigue_slope": round(m.fatigue_slope, 4),
-
-        # Knee Load Index
-        "kli": m.kli,
-        "kli_status": m.kli_status,
-        "cumulative_load": m.cumulative_load,
-        "load_per_step": m.load_per_step,
-        "load_rate": m.load_rate,
-
-        # Rangos del dispositivo
-        "gss_good": list(m.gss_good),
-        "gss_warn": list(m.gss_warn),
-    }
-
+        acc_clean = processor.process_accelerometer(acc_df)
+        metrics = analyzer.analyze(acc_clean, loc_df)
+        return {"status": "demo", "metrics": metrics}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze/ml")
 async def analyze_with_ml(
-    accel_file: UploadFile = File(...),
-    gps_file: Optional[UploadFile] = File(None),
-    device: str = "Espalda / Canguro",
-    history_json: str = "[]",
-    target_distance_km: float = 10.0,
+    accelerometer: UploadFile = File(...),
+    location: UploadFile = File(None)
 ):
-    """
-    Analiza sesión + corre los 3 modelos de ML.
-    history_json: historial de sesiones anteriores del usuario (JSON string).
-    """
-    from services.ml_engine import ml_engine
-
-    # Análisis biomecánico base
-    accel_bytes = await accel_file.read()
-    accel_df = pd.read_csv(io.StringIO(accel_bytes.decode("utf-8", errors="replace")))
-
-    gps_df = None
-    if gps_file:
-        try:
-            gps_bytes = await gps_file.read()
-            gps_df = pd.read_csv(io.StringIO(gps_bytes.decode("utf-8", errors="replace")))
-            gps_df.columns = [c.strip().lower() for c in gps_df.columns]
-        except Exception:
-            gps_df = None
-
-    device_config = {**DEVICE_POSITIONS.get(device, DEVICE_POSITIONS["Espalda / Canguro"]), "name": device}
-
-    accel_clean = preprocess_accelerometer(accel_df)
-    peaks, peak_times, peak_values = detect_steps(accel_clean)
-
-    if len(peaks) < 10:
-        raise HTTPException(status_code=422, detail="No se detectaron suficientes pisadas.")
-
-    metrics = analyze_session(accel_clean, peak_times, peak_values, gps_df, device_config)
-    session_data = _metrics_to_response(metrics)
-
-    # Parsear historial
     try:
-        history = json.loads(history_json)
-    except Exception:
-        history = []
+        acc_content = await accelerometer.read()
+        acc_df = pd.read_csv(io.StringIO(acc_content.decode("utf-8")))
+        loc_df = None
+        if location:
+            loc_content = await location.read()
+            loc_df = pd.read_csv(io.StringIO(loc_content.decode("utf-8")))
 
-    # Correr ML
-    ml_results = ml_engine.analyze(
-        session=session_data,
-        history=history,
-        target_distance_km=target_distance_km,
-    )
+        acc_clean = processor.process_accelerometer(acc_df)
+        metrics = analyzer.analyze(acc_clean, loc_df)
+        ml_results = ml_engine.predict(metrics)
 
-    return {**session_data, "ml": ml_results}
-
+        return {"status": "success", "metrics": metrics, "ml": ml_results}
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 @app.post("/ml/predict")
-async def predict_only(
-    session_json: str,
-    history_json: str = "[]",
-    target_distance_km: float = 10.0,
-):
-    """
-    Corre solo los modelos ML sobre datos ya calculados.
-    Útil para recalcular predicciones sin re-analizar el CSV.
-    """
-    from services.ml_engine import ml_engine
+def predict_only(metrics: dict):
     try:
-        session = json.loads(session_json)
-        history = json.loads(history_json)
+        ml_results = ml_engine.predict(metrics)
+        return {"status": "success", "predictions": ml_results}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"JSON inválido: {e}")
-
-    return ml_engine.analyze(session=session, history=history,
-                             target_distance_km=target_distance_km)
-
+        raise HTTPException(status_code=422, detail=str(e))
