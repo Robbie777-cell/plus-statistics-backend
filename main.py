@@ -5,12 +5,12 @@ import numpy as np
 import io
 import os
 
-from .core.signal_processing import SignalProcessor
-from .core.biomechanics import BiomechanicsAnalyzer
-from .services.ml_engine import MLEngine
-from .db.database import create_tables
-from .api.auth_routes import router as auth_router
-from .api.session_routes import router as sessions_router
+from core.signal_processing import SignalProcessor
+from core.biomechanics import BiomechanicsAnalyzer
+from services.ml_engine import MLEngine
+from db.database import create_tables
+from api.auth_routes import router as auth_router
+from api.session_routes import router as sessions_router
 
 app = FastAPI(
     title="+Statistics API",
