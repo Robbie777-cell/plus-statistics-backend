@@ -4,13 +4,13 @@ import pandas as pd
 import numpy as np
 import io
 import os
-
 from core.signal_processing import SignalProcessor
 from core.biomechanics import BiomechanicsAnalyzer
 from services.ml_engine import MLEngine
 from db.database import create_tables
 from api.auth_routes import router as auth_router
 from api.session_routes import router as sessions_router
+from api.strava_routes import router as strava_router
 
 app = FastAPI(
     title="+Statistics API",
@@ -34,6 +34,7 @@ def startup():
 # Routers
 app.include_router(auth_router)
 app.include_router(sessions_router)
+app.include_router(strava_router)
 
 processor = SignalProcessor()
 analyzer = BiomechanicsAnalyzer()
@@ -58,15 +59,12 @@ async def analyze(
     try:
         acc_content = await accelerometer.read()
         acc_df = pd.read_csv(io.StringIO(acc_content.decode("utf-8")))
-
         loc_df = None
         if location:
             loc_content = await location.read()
             loc_df = pd.read_csv(io.StringIO(loc_content.decode("utf-8")))
-
         acc_clean = processor.process_accelerometer(acc_df)
         metrics = analyzer.analyze(acc_clean, loc_df)
-
         return {"status": "success", "metrics": metrics}
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -85,7 +83,6 @@ def analyze_demo():
             "time": np.linspace(0, 600, 100),
             "velocity": np.random.normal(3.0, 0.3, 100)
         })
-
         acc_clean = processor.process_accelerometer(acc_df)
         metrics = analyzer.analyze(acc_clean, loc_df)
         return {"status": "demo", "metrics": metrics}
@@ -104,11 +101,9 @@ async def analyze_with_ml(
         if location:
             loc_content = await location.read()
             loc_df = pd.read_csv(io.StringIO(loc_content.decode("utf-8")))
-
         acc_clean = processor.process_accelerometer(acc_df)
         metrics = analyzer.analyze(acc_clean, loc_df)
         ml_results = ml_engine.predict(metrics)
-
         return {"status": "success", "metrics": metrics, "ml": ml_results}
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
