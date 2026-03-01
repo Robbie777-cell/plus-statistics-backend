@@ -1,277 +1,155 @@
-"""
-core/biomechanics.py
-Cálculo de métricas biomecánicas de carrera.
-Incluye el nuevo índice de carga en rodilla (KLI).
-"""
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
-from typing import Optional
+from scipy.ndimage import gaussian_filter1d
+from .signal_processing import SignalProcessor
 
 
-@dataclass
-class SessionMetrics:
-    """Todas las métricas de una sesión de carrera."""
-    # Básicas
-    rei: float = 0.0           # Running Economy Index (0-100)
-    gss: float = 0.0           # Ground Shock Score (m/s²)
-    cadence: float = 0.0       # Cadencia media (ppm)
-    asymmetry: float = 0.0     # Asimetría izq/der (%)
-    speed: float = 0.0         # Velocidad media (m/s)
-    duration: float = 0.0      # Duración (min)
-    steps: int = 0             # Total pisadas
+class BiomechanicsAnalyzer:
+    def __init__(self):
+        self.processor = SignalProcessor()
 
-    # Fatigue
-    fi_times: list = field(default_factory=list)
-    fi_values: list = field(default_factory=list)
-    fatigue_slope: float = 0.0
+    def analyze(self, df: pd.DataFrame, loc_df: pd.DataFrame = None) -> dict:
+        try:
+            peaks = self.processor.detect_steps(df)
+            n_steps = len(peaks)
+            duration = float(df["time"].iloc[-1] - df["time"].iloc[0]) if len(df) > 1 else 0
+            duration_min = duration / 60.0
 
-    # Carga en rodilla (nuevo)
-    kli: float = 0.0           # Knee Load Index (0-100, mayor = más riesgo)
-    kli_status: str = "OK"     # "OK", "WARNING", "STOP"
-    cumulative_load: float = 0.0  # Carga acumulada absoluta
-    load_per_step: float = 0.0    # Carga promedio por pisada
-    load_rate: float = 0.0        # Tasa de carga (m/s² por segundo)
+            # Cadencia
+            cadence_avg = 0.0
+            if n_steps > 0 and duration > 0:
+                cadence_avg = (n_steps / duration) * 60.0
+                cadence_avg = float(np.clip(cadence_avg, 100, 230))
 
-    # GPS
-    gps_available: bool = False
-    pace_min_km: float = 0.0
+            # Magnitud de impacto
+            magnitude = np.sqrt(df["x"]**2 + df["y"]**2 + df["z"]**2)
+            ground_shock = float(magnitude.mean())
 
-    # Configuración
-    device: str = "Espalda / Canguro"
-    gss_good: tuple = (4, 9)
-    gss_warn: tuple = (9, 13)
+            # Asimetría
+            left = magnitude.iloc[::2].values if len(magnitude) > 2 else magnitude.values
+            right = magnitude.iloc[1::2].values if len(magnitude) > 2 else magnitude.values
+            if len(left) > 0 and len(right) > 0:
+                asymmetry = float(abs(left.mean() - right.mean()) / max(magnitude.mean(), 0.001) * 100)
+                asymmetry = float(np.clip(asymmetry, 0, 50))
+            else:
+                asymmetry = 0.0
 
+            # Fatigue index
+            fi_values = self._compute_fatigue_index(magnitude, n_segments=5)
+            fatigue_index = float(fi_values[-1]) if len(fi_values) > 0 else 0.5
 
-def running_economy_index(accel: pd.DataFrame, peak_values: np.ndarray) -> float:
-    """REI: combina varianza vertical + consistencia de impacto. Rango 0-100."""
-    z = accel["z_filt"].values - 9.81 if "z_filt" in accel.columns else accel["z"].values - 9.81
+            # Velocidad GPS
+            velocity_avg = 0.0
+            distance_km = 0.0
+            if loc_df is not None and "velocity" in loc_df.columns:
+                vel = pd.to_numeric(loc_df["velocity"], errors="coerce").dropna()
+                if len(vel) > 0:
+                    velocity_avg = float(vel.mean())
+                    distance_km = float(velocity_avg * duration / 1000.0)
 
-    signal_range = np.percentile(np.abs(z), 95) or 1.0
-    vertical_var = np.var(z) / (signal_range ** 2)
-    score_var = max(0.0, 1.0 - vertical_var * 3)
+            # Running economy (pace en min/km)
+            running_economy = 0.0
+            if velocity_avg > 0.1:
+                running_economy = round(1000.0 / (velocity_avg * 60.0), 1)
 
-    if len(peak_values) > 4:
-        cv = np.std(peak_values) / (np.mean(np.abs(peak_values)) + 1e-6)
-        score_cv = max(0.0, 1.0 - cv * 2)
-    else:
-        score_cv = 0.5
+            # KLI - Knee Load Index
+            kli_result = self._compute_kli(
+                ground_shock=ground_shock,
+                n_steps=n_steps,
+                duration=duration,
+                cadence=cadence_avg,
+                asymmetry=asymmetry,
+                fi_values=fi_values
+            )
 
-    return round((score_var * 0.6 + score_cv * 0.4) * 100, 1)
+            # Cadencia temporal
+            t_cad, cad_arr = self.processor.compute_cadence_over_time(df, peaks)
 
+            return {
+                "duration_minutes": round(duration_min, 2),
+                "steps": n_steps,
+                "cadence_avg": round(cadence_avg, 1),
+                "ground_shock_avg": round(ground_shock, 3),
+                "asymmetry": round(asymmetry, 2),
+                "fatigue_index": round(fatigue_index, 3),
+                "velocity_avg": round(velocity_avg, 3),
+                "distance_km": round(distance_km, 3),
+                "running_economy": running_economy,
+                "fi_values": [round(float(v), 3) for v in fi_values],
+                "cadence_over_time": {
+                    "time": t_cad.tolist() if len(t_cad) > 0 else [],
+                    "cadence": cad_arr.tolist() if len(cad_arr) > 0 else []
+                },
+                **kli_result
+            }
+        except Exception as e:
+            return {"error": str(e), "kli": 0, "kli_status": "ERROR"}
 
-def ground_shock_score(peak_values: np.ndarray) -> tuple:
-    """GSS: impacto medio (m/s²). Devuelve (gss, mean, max)."""
-    mean_i = float(np.mean(np.abs(peak_values)))
-    max_i = float(np.max(np.abs(peak_values)))
-    return round(mean_i, 2), mean_i, max_i
+    def _compute_fatigue_index(self, magnitude: pd.Series, n_segments: int = 5) -> np.ndarray:
+        try:
+            n = len(magnitude)
+            if n < n_segments * 2:
+                return np.array([0.5])
+            seg_size = n // n_segments
+            fi_values = []
+            base = magnitude.iloc[:seg_size].mean()
+            for i in range(n_segments):
+                seg = magnitude.iloc[i * seg_size:(i + 1) * seg_size]
+                fi = float(seg.mean() / max(base, 0.001))
+                fi_values.append(np.clip(fi, 0.1, 2.0))
+            return np.array(fi_values)
+        except Exception:
+            return np.array([0.5])
 
+    def _compute_kli(self, ground_shock: float, n_steps: int, duration: float,
+                     cadence: float, asymmetry: float, fi_values: np.ndarray) -> dict:
+        try:
+            # Carga base: impacto × pasos
+            base_load = ground_shock * n_steps
 
-def cadence_and_asymmetry(peak_times: np.ndarray) -> tuple:
-    """Cadencia (ppm) y asimetría (%) filtradas fisiológicamente."""
-    if len(peak_times) < 4:
-        return 0.0, 0.0
+            # Tasa de carga por minuto
+            duration_min = max(duration / 60.0, 0.001)
+            load_rate = base_load / duration_min
 
-    intervals = np.diff(peak_times)
-    valid = (intervals >= 0.25) & (intervals <= 1.0)
-    clean = intervals[valid] if valid.sum() >= 2 else intervals
+            # Penalización por cadencia baja (< 160 spm es más carga en rodilla)
+            cadence_penalty = max(0, (160 - cadence) / 160) * 0.3 if cadence > 0 else 0
 
-    median_iv = np.median(clean)
-    if median_iv <= 0:
-        return 0.0, 0.0
+            # Penalización por asimetría
+            asymmetry_penalty = (asymmetry / 50.0) * 0.2
 
-    cadence = round(60.0 / median_iv, 1)
+            # Pendiente de fatiga
+            if len(fi_values) >= 2:
+                fatigue_slope = float(np.polyfit(range(len(fi_values)), fi_values, 1)[0])
+            else:
+                fatigue_slope = 0.0
 
-    left, right = clean[0::2], clean[1::2]
-    n = min(len(left), len(right))
-    asymmetry = 0.0
-    if n > 0:
-        asymmetry = (abs(np.mean(left[:n]) - np.mean(right[:n])) / median_iv) * 100
+            # KLI final (normalizado 0-100)
+            kli_raw = (
+                (ground_shock * n_steps / max(duration_min, 1)) * 0.5 +
+                cadence_penalty * 10 +
+                asymmetry_penalty * 10 +
+                max(fatigue_slope, 0) * 20
+            )
+            kli = float(np.clip(kli_raw, 0, 100))
 
-    return cadence, round(asymmetry, 2)
+            # Estado
+            if kli < 20:
+                kli_status = "OK"
+            elif kli < 40:
+                kli_status = "WARNING"
+            elif kli < 60:
+                kli_status = "HIGH"
+            else:
+                kli_status = "CRITICAL"
 
-
-def fatigue_index(accel: pd.DataFrame, peak_times: np.ndarray,
-                  peak_values: np.ndarray, window_minutes: int = 2) -> tuple:
-    """Índice de fatiga por ventana de tiempo."""
-    total_time = accel["time"].max()
-    window = window_minutes * 60
-    fi_times, fi_values = [], []
-
-    for w_start in np.arange(0, min(total_time, 3600), window):
-        mask = (peak_times >= w_start) & (peak_times < w_start + window)
-        wp = peak_values[mask]
-        if len(wp) < 4:
-            continue
-        fi = float(np.mean(np.abs(wp)) * 0.6 + np.std(wp) * 0.4)
-        fi_times.append(float(w_start / 60))
-        fi_values.append(round(fi, 3))
-
-    return fi_times, fi_values
-
-
-def knee_load_index(
-    peak_values: np.ndarray,
-    peak_times: np.ndarray,
-    cadence: float,
-    asymmetry: float,
-    gss: float,
-    gss_warn: tuple,
-    duration_min: float,
-    user_profile: Optional[dict] = None
-) -> dict:
-    """
-    Knee Load Index (KLI) — índice de carga en rodilla.
-
-    Modelo basado en factores de riesgo biomecánicos conocidos:
-    - Impacto por pisada (peak_values)
-    - Tasa de carga (load rate) — cuán rápido aumenta la fuerza
-    - Cadencia baja → mayor tiempo de contacto → más carga
-    - Asimetría → sobrecarga de un lado
-    - Carga acumulada total de la sesión
-    - Historial personal (si disponible)
-
-    Retorna dict con KLI (0-100), status, y desglose.
-    """
-    if len(peak_values) < 4 or duration_min <= 0:
-        return {"kli": 0.0, "status": "OK", "cumulative_load": 0.0,
-                "load_per_step": 0.0, "load_rate": 0.0, "factors": {}}
-
-    impacts = np.abs(peak_values)
-    mean_impact = float(np.mean(impacts))
-    total_steps = len(peak_values)
-
-    # ── Factor 1: Carga acumulada (impacto × pasos) ──
-    cumulative_load = float(mean_impact * total_steps)
-    # Normalizar: ~10,000 pasos × 5 m/s² = 50,000 unidades base (score 50)
-    load_score = min(100.0, (cumulative_load / 50_000) * 50)
-
-    # ── Factor 2: Load Rate (tasa de carga) ──
-    # Estimamos la velocidad de impacto = variabilidad de los peaks
-    if len(peak_times) > 1:
-        impact_diff = np.abs(np.diff(impacts))
-        time_diff = np.abs(np.diff(peak_times))
-        rates = impact_diff / (time_diff + 1e-6)
-        load_rate = float(np.mean(rates))
-    else:
-        load_rate = 0.0
-    rate_score = min(30.0, load_rate * 10)
-
-    # ── Factor 3: Penalización por cadencia baja ──
-    # Cadencia <160 → mayor tiempo en suelo → más carga por pisada
-    cadence_penalty = 0.0
-    if cadence > 0:
-        if cadence < 155:
-            cadence_penalty = 15.0
-        elif cadence < 165:
-            cadence_penalty = 8.0
-        elif cadence < 170:
-            cadence_penalty = 3.0
-
-    # ── Factor 4: Penalización por asimetría ──
-    # Asimetría >10% indica sobrecarga unilateral
-    asym_penalty = 0.0
-    if asymmetry > 10:
-        asym_penalty = 12.0
-    elif asymmetry > 5:
-        asym_penalty = 5.0
-
-    # ── Factor 5: GSS relativo al dispositivo ──
-    gss_threshold = gss_warn[1]
-    gss_penalty = 0.0
-    if gss > gss_threshold:
-        gss_penalty = min(15.0, ((gss - gss_threshold) / gss_threshold) * 15)
-
-    # ── KLI compuesto ──
-    kli = load_score + rate_score + cadence_penalty + asym_penalty + gss_penalty
-    kli = round(min(100.0, kli), 1)
-
-    # ── Status ──
-    if kli >= 70:
-        status = "STOP"      # Alto riesgo — parar o reducir
-    elif kli >= 45:
-        status = "WARNING"   # Precaución — monitorear
-    else:
-        status = "OK"
-
-    # ── Umbral personal (si hay historial) ──
-    personal_threshold = None
-    if user_profile and "kli_history" in user_profile:
-        hist = user_profile["kli_history"]
-        if len(hist) >= 3:
-            personal_threshold = float(np.mean(hist[-5:]) + np.std(hist[-5:]) * 1.5)
-            if kli > personal_threshold:
-                status = max(status, "WARNING")  # Supera su propio umbral
-
-    return {
-        "kli": kli,
-        "status": status,
-        "cumulative_load": round(cumulative_load, 1),
-        "load_per_step": round(mean_impact, 3),
-        "load_rate": round(load_rate, 4),
-        "personal_threshold": personal_threshold,
-        "factors": {
-            "load_score": round(load_score, 1),
-            "rate_score": round(rate_score, 1),
-            "cadence_penalty": cadence_penalty,
-            "asym_penalty": asym_penalty,
-            "gss_penalty": round(gss_penalty, 1),
-        }
-    }
-
-
-def analyze_session(
-    accel: pd.DataFrame,
-    peak_times: np.ndarray,
-    peak_values: np.ndarray,
-    gps: Optional[pd.DataFrame],
-    device_config: dict,
-    user_profile: Optional[dict] = None
-) -> SessionMetrics:
-    """
-    Función principal: calcula todas las métricas de una sesión.
-    Recibe datos ya preprocesados.
-    """
-    m = SessionMetrics()
-    m.device = device_config.get("name", "Desconocido")
-    m.gss_good = device_config.get("gss_good", (4, 9))
-    m.gss_warn = device_config.get("gss_warn", (9, 13))
-    m.steps = len(peak_times)
-    m.duration = float(accel["time"].max() / 60)
-
-    # Métricas base
-    m.rei = running_economy_index(accel, peak_values)
-    m.gss, _, _ = ground_shock_score(peak_values)
-    m.cadence, m.asymmetry = cadence_and_asymmetry(peak_times)
-    m.fi_times, m.fi_values = fatigue_index(accel, peak_times, peak_values)
-
-    if len(m.fi_values) >= 2:
-        m.fatigue_slope = float(np.polyfit(m.fi_times, m.fi_values, 1)[0])
-
-    # Velocidad
-    if gps is not None and "speed" in gps.columns:
-        m.speed = float(np.mean(gps["speed"].values))
-        m.gps_available = True
-        if m.speed > 0:
-            m.pace_min_km = round((1000 / m.speed) / 60, 2)
-    elif m.steps > 0 and m.duration > 0:
-        m.speed = round(m.steps / 2 / m.duration / 60, 2)
-
-    # Knee Load Index
-    kli_result = knee_load_index(
-        peak_values=peak_values,
-        peak_times=peak_times,
-        cadence=m.cadence,
-        asymmetry=m.asymmetry,
-        gss=m.gss,
-        gss_warn=m.gss_warn,
-        duration_min=m.duration,
-        user_profile=user_profile
-    )
-    m.kli = kli_result["kli"]
-    m.kli_status = kli_result["status"]
-    m.cumulative_load = kli_result["cumulative_load"]
-    m.load_per_step = kli_result["load_per_step"]
-    m.load_rate = kli_result["load_rate"]
-
-    return m
+            return {
+                "kli": round(kli, 2),
+                "kli_status": kli_status,
+                "cumulative_load": round(base_load, 2),
+                "load_per_step": round(base_load / max(n_steps, 1), 3),
+                "load_rate": round(load_rate, 3),
+                "fatigue_slope": round(fatigue_slope, 4),
+            }
+        except Exception:
+            return {"kli": 0, "kli_status": "ERROR", "cumulative_load": 0,
+                    "load_per_step": 0, "load_rate": 0, "fatigue_slope": 0}
