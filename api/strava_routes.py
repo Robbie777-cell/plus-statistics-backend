@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 import httpx
 import os
 from services.auth import get_current_user
-from database import get_db
+from db.database import get_db
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/strava", tags=["strava"])
@@ -35,4 +35,4 @@ async def strava_callback(code: str, db: Session = Depends(get_db), current_user
     data = response.json()
     if "access_token" not in data:
         raise HTTPException(status_code=400, detail="Error conectando Strava")
-    return {"status": "conectado", "athlete": data.get("athlete", {}).get("firstname")} 
+    return {"status": "conectado", "athlete": data.get("athlete", {}).get("firstname")}
