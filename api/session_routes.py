@@ -1,142 +1,129 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session as DBSession
-from typing import List, Optional
-from datetime import datetime
+from sqlalchemy.orm import Session
+from db.database import get_db
+from db.models import User, SessionRecord
+from services.auth import get_current_user
+from services.ml_engine import ml_engine
 from pydantic import BaseModel
-from ..db.database import get_db
-from ..db.models import Session as SessionModel, User
-from ..services.auth import get_current_user
+from typing import Optional
+import json
+from datetime import datetime
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-class SessionCreate(BaseModel):
-    session_date: Optional[str] = None
-    device_position: Optional[str] = "espalda"
-    source: Optional[str] = "manual"
-    duration_minutes: Optional[float] = None
-    distance_km: Optional[float] = None
-    steps: Optional[int] = None
-    cadence_avg: Optional[float] = None
-    velocity_avg: Optional[float] = None
-    ground_shock_avg: Optional[float] = None
-    asymmetry: Optional[float] = None
-    fatigue_index: Optional[float] = None
-    running_economy: Optional[float] = None
-    kli: Optional[float] = None
-    kli_status: Optional[str] = None
-    cumulative_load: Optional[float] = None
-    injury_risk: Optional[float] = None
-    injury_risk_level: Optional[str] = None
-    optimal_pace: Optional[float] = None
-    recovery_days: Optional[int] = None
-    raw_metrics: Optional[dict] = None
 
-class SessionResponse(BaseModel):
-    id: int
-    created_at: str
-    session_date: Optional[str]
-    device_position: Optional[str]
-    source: Optional[str]
-    duration_minutes: Optional[float]
-    distance_km: Optional[float]
-    steps: Optional[int]
-    cadence_avg: Optional[float]
-    velocity_avg: Optional[float]
-    ground_shock_avg: Optional[float]
-    asymmetry: Optional[float]
-    fatigue_index: Optional[float]
-    running_economy: Optional[float]
-    kli: Optional[float]
-    kli_status: Optional[str]
-    cumulative_load: Optional[float]
-    injury_risk: Optional[float]
-    injury_risk_level: Optional[str]
-    optimal_pace: Optional[float]
-    recovery_days: Optional[int]
+class SessionSave(BaseModel):
+    session_data: dict
+    device: Optional[str] = "Espalda / Canguro"
 
-    class Config:
-        from_attributes = True
 
-@router.post("/save", response_model=SessionResponse)
+@router.post("/save")
 def save_session(
-    data: SessionCreate,
-    db: DBSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    body: SessionSave,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    session = SessionModel(
+    d = body.session_data
+
+    record = SessionRecord(
         user_id=current_user.id,
-        session_date=datetime.fromisoformat(data.session_date) if data.session_date else datetime.utcnow(),
-        **{k: v for k, v in data.dict().items() if k != "session_date"}
+        date=d.get("date", datetime.now().isoformat()),
+        duration=d.get("duration", 0),
+        steps=d.get("steps", 0),
+        device=body.device,
+        rei=d.get("rei", 0),
+        gss=d.get("gss", 0),
+        cadence=d.get("cadence", 0),
+        asymmetry=d.get("asymmetry", 0),
+        speed=d.get("speed", 0),
+        kli=d.get("kli", 0),
+        kli_status=d.get("kli_status", "OK"),
+        cumulative_load=d.get("cumulative_load", 0),
+        fatigue_slope=d.get("fatigue_slope", 0),
+        fi_times=json.dumps(d.get("fi_times", [])),
+        fi_values=json.dumps(d.get("fi_values", [])),
     )
-    db.add(session)
+    db.add(record)
     db.commit()
-    db.refresh(session)
-    return SessionResponse(
-        **{c: str(getattr(session, c)) if isinstance(getattr(session, c), datetime) else getattr(session, c)
-           for c in ["id", "created_at", "session_date", "device_position", "source",
-                     "duration_minutes", "distance_km", "steps", "cadence_avg", "velocity_avg",
-                     "ground_shock_avg", "asymmetry", "fatigue_index", "running_economy",
-                     "kli", "kli_status", "cumulative_load", "injury_risk", "injury_risk_level",
-                     "optimal_pace", "recovery_days"]}
-    )
+    db.refresh(record)
+    return {"status": "saved", "session_id": record.id}
 
-@router.get("/history", response_model=List[SessionResponse])
+
+@router.get("/history")
 def get_history(
-    limit: int = 50,
-    db: DBSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    sessions = db.query(SessionModel)\
-        .filter(SessionModel.user_id == current_user.id)\
-        .order_by(SessionModel.created_at.desc())\
-        .limit(limit).all()
+    records = (
+        db.query(SessionRecord)
+        .filter(SessionRecord.user_id == current_user.id)
+        .order_by(SessionRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "sessions": [_record_to_dict(r) for r in records],
+        "total": len(records)
+    }
 
-    result = []
-    for s in sessions:
-        result.append(SessionResponse(
-            **{c: str(getattr(s, c)) if isinstance(getattr(s, c), datetime) else getattr(s, c)
-               for c in ["id", "created_at", "session_date", "device_position", "source",
-                         "duration_minutes", "distance_km", "steps", "cadence_avg", "velocity_avg",
-                         "ground_shock_avg", "asymmetry", "fatigue_index", "running_economy",
-                         "kli", "kli_status", "cumulative_load", "injury_risk", "injury_risk_level",
-                         "optimal_pace", "recovery_days"]}
-        ))
-    return result
 
 @router.get("/stats")
 def get_stats(
-    db: DBSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    sessions = db.query(SessionModel)\
-        .filter(SessionModel.user_id == current_user.id).all()
+    records = db.query(SessionRecord).filter(
+        SessionRecord.user_id == current_user.id
+    ).all()
 
-    if not sessions:
-        return {"total_sessions": 0, "message": "Sin sesiones aún"}
-
-    total = len(sessions)
-    avg_cadence = sum(s.cadence_avg for s in sessions if s.cadence_avg) / max(1, sum(1 for s in sessions if s.cadence_avg))
-    avg_kli = sum(s.kli for s in sessions if s.kli) / max(1, sum(1 for s in sessions if s.kli))
-    high_risk = sum(1 for s in sessions if s.injury_risk_level in ["HIGH", "CRITICAL"])
+    if not records:
+        return {"total_sessions": 0}
 
     return {
-        "total_sessions": total,
-        "avg_cadence": round(avg_cadence, 1),
-        "avg_kli": round(avg_kli, 2),
-        "high_risk_sessions": high_risk,
-        "ml_ready": total >= 30
+        "total_sessions": len(records),
+        "avg_rei": round(sum(r.rei for r in records) / len(records), 1),
+        "avg_cadence": round(sum(r.cadence for r in records) / len(records), 1),
+        "avg_kli": round(sum(r.kli for r in records) / len(records), 1),
+        "total_steps": sum(r.steps for r in records),
     }
 
-@router.delete("/{session_id}")
-def delete_session(
-    session_id: int,
-    db: DBSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+
+@router.post("/ml/analyze")
+def ml_analyze(
+    body: SessionSave,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    session = db.query(SessionModel)\
-        .filter(SessionModel.id == session_id, SessionModel.user_id == current_user.id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Sesión no encontrada")
-    db.delete(session)
-    db.commit()
-    return {"message": "Sesión eliminada"}
+    """Corre los 3 modelos ML sobre la sesión + historial del usuario."""
+    records = db.query(SessionRecord).filter(
+        SessionRecord.user_id == current_user.id
+    ).order_by(SessionRecord.id.desc()).limit(30).all()
+
+    history = [_record_to_dict(r) for r in records]
+    result = ml_engine.analyze(
+        session=body.session_data,
+        history=history
+    )
+    return result
+
+
+def _record_to_dict(r: SessionRecord) -> dict:
+    return {
+        "id": r.id,
+        "date": r.date,
+        "duration": r.duration,
+        "steps": r.steps,
+        "device": r.device,
+        "rei": r.rei,
+        "gss": r.gss,
+        "cadence": r.cadence,
+        "asymmetry": r.asymmetry,
+        "speed": r.speed,
+        "kli": r.kli,
+        "kli_status": r.kli_status,
+        "cumulative_load": r.cumulative_load,
+        "fatigue_slope": r.fatigue_slope,
+        "fi_times": json.loads(r.fi_times) if r.fi_times else [],
+        "fi_values": json.loads(r.fi_values) if r.fi_values else [],
+    }

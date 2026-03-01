@@ -1,75 +1,84 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
-from ..db.database import get_db
-from ..services.auth import (
-    authenticate_user, create_user, create_access_token,
-    get_user_by_email, get_user_by_username, get_current_user
+from db.database import get_db
+from db.models import User
+from services.auth import (
+    get_password_hash, verify_password,
+    create_access_token, get_current_user
 )
-from ..db.models import User
+from pydantic import BaseModel, EmailStr
+from typing import Optional
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-class RegisterRequest(BaseModel):
+
+class UserRegister(BaseModel):
     email: str
     username: str
     password: str
+    full_name: Optional[str] = None
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    username: str
+
+class UserLogin(BaseModel):
     email: str
+    password: str
 
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    username: str
-    created_at: str
 
-    class Config:
-        from_attributes = True
+@router.post("/register")
+def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    # Verificar si ya existe
+    existing = db.query(User).filter(
+        (User.email == user_data.email) | (User.username == user_data.username)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email o username ya existe")
 
-@router.post("/register", response_model=TokenResponse)
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
-    if get_user_by_email(db, data.email):
-        raise HTTPException(status_code=400, detail="El email ya está registrado")
-    if get_user_by_username(db, data.username):
-        raise HTTPException(status_code=400, detail="El username ya está en uso")
-    if len(data.password) < 6:
-        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
-
-    user = create_user(db, data.email, data.username, data.password)
-    token = create_access_token({"sub": user.email})
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        username=user.username,
-        email=user.email
+    user = User(
+        email=user_data.email,
+        username=user_data.username,
+        full_name=user_data.full_name or "",
+        hashed_password=get_password_hash(user_data.password)
     )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
 
-@router.post("/login", response_model=TokenResponse)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = authenticate_user(db, form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email o contraseña incorrectos"
-        )
-    token = create_access_token({"sub": user.email})
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        username=user.username,
-        email=user.email
-    )
+    token = create_access_token({"sub": str(user.id)})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username
+        }
+    }
 
-@router.get("/me", response_model=UserResponse)
+
+@router.post("/login")
+def login(user_data: UserLogin, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == user_data.email).first()
+    if not user or not verify_password(user_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+
+    token = create_access_token({"sub": str(user.id)})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username
+        }
+    }
+
+
+@router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    return UserResponse(
-        id=current_user.id,
-        email=current_user.email,
-        username=current_user.username,
-        created_at=str(current_user.created_at)
-    )
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "username": current_user.username,
+        "full_name": current_user.full_name
+    }
