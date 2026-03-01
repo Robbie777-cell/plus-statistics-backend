@@ -3,8 +3,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db.models import Base
 
-# Limpiar el DATABASE_URL de espacios y saltos de línea invisibles
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./plusstats.db").strip()
+# DB_URL tiene prioridad — variable manual con nombre correcto
+# DATABASE_URL es la que Railway genera automáticamente (puede tener /railway al final)
+DATABASE_URL = (
+    os.environ.get("DB_URL") or
+    os.environ.get("DATABASE_URL", "sqlite:///./plusstats.db")
+).strip()
 
 # Railway a veces da postgres:// en lugar de postgresql://
 if DATABASE_URL.startswith("postgres://"):
