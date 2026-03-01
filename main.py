@@ -26,12 +26,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Crear tablas al iniciar
 @app.on_event("startup")
 def startup():
     create_tables()
 
-# Routers
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(strava_router)
