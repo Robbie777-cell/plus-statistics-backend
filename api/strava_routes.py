@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from urllib.parse import quote
 import httpx
 import os
 from db.database import get_db
 from db.models import SessionRecord, StravaToken
-from services.auth import get_current_user
+from services.auth import get_current_user, verify_token
 from services.strava import (
     save_strava_token,
     get_strava_token,
@@ -13,7 +14,6 @@ from services.strava import (
     strava_activity_to_session,
 )
 from sqlalchemy.orm import Session
-import json
 
 router = APIRouter(prefix="/strava", tags=["strava"])
 
@@ -23,14 +23,16 @@ REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI")
 
 
 @router.get("/connect")
-def connect_strava():
-    """Inicia el flujo OAuth con Strava."""
+def connect_strava(token: str = Query(..., description="JWT del usuario")):
+    """Inicia el flujo OAuth con Strava. Requiere JWT como query param."""
+    encoded_token = quote(token, safe="")
     url = (
         f"https://www.strava.com/oauth/authorize"
         f"?client_id={CLIENT_ID}"
         f"&redirect_uri={REDIRECT_URI}"
         f"&response_type=code"
         f"&scope=activity:read_all"
+        f"&state={encoded_token}"
     )
     return RedirectResponse(url)
 
@@ -38,10 +40,14 @@ def connect_strava():
 @router.get("/callback")
 async def strava_callback(
     code: str,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    state: str = "",
+    db: Session = Depends(get_db)
 ):
-    """Recibe el código OAuth de Strava y guarda el token."""
+    """Recibe el código OAuth. El JWT del usuario viene en el state."""
+    current_user = verify_token(state, db)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Token inválido. Inicia sesión e intenta de nuevo.")
+
     async with httpx.AsyncClient() as client:
         response = await client.post("https://www.strava.com/oauth/token", data={
             "client_id": CLIENT_ID,
@@ -58,7 +64,7 @@ async def strava_callback(
     return {
         "status": "conectado",
         "athlete": data.get("athlete", {}).get("firstname"),
-        "message": "Strava conectado exitosamente. Ya puedes importar tus actividades."
+        "message": "Strava conectado exitosamente. Ya puedes importar tus actividades desde /strava/import"
     }
 
 
@@ -88,7 +94,7 @@ async def import_activities(
     """Importa actividades de Strava y las guarda como sesiones."""
     token = get_strava_token(db, current_user.id)
     if not token:
-        raise HTTPException(status_code=400, detail="Strava no está conectado. Ve a /strava/connect primero.")
+        raise HTTPException(status_code=400, detail="Strava no está conectado.")
 
     access_token = await refresh_access_token(db, token)
     activities = await fetch_strava_activities(access_token, per_page=per_page, page=page)
@@ -100,14 +106,11 @@ async def import_activities(
     skipped = 0
 
     for activity in activities:
-        # Solo importar actividades de running
         if activity.get("type") not in ["Run", "TrailRun", "VirtualRun"]:
             skipped += 1
             continue
 
         strava_id = str(activity.get("id", ""))
-
-        # Verificar si ya existe
         existing = db.query(SessionRecord).filter(
             SessionRecord.user_id == current_user.id,
             SessionRecord.strava_activity_id == strava_id
@@ -139,7 +142,7 @@ async def get_strava_activities(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Obtiene actividades directamente desde Strava (sin guardar)."""
+    """Obtiene actividades directamente desde Strava."""
     token = get_strava_token(db, current_user.id)
     if not token:
         raise HTTPException(status_code=400, detail="Strava no está conectado.")
