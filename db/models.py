@@ -37,6 +37,10 @@ class SessionRecord(Base):
     asymmetry = Column(Float, default=0.0)
     speed = Column(Float, default=0.0)
 
+    # Distancia y cardio (Strava)
+    distance = Column(Float, default=0.0, nullable=True)
+    heart_rate = Column(Float, default=0.0, nullable=True)
+
     # KLI
     kli = Column(Float, default=0.0)
     kli_status = Column(String, default="OK")

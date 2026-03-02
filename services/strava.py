@@ -76,17 +76,22 @@ async def fetch_strava_activities(access_token: str, per_page: int = 30, page: i
 
 def strava_activity_to_session(activity: dict, user_id: int) -> dict:
     """Convierte una actividad de Strava al formato SessionRecord."""
-    distance = activity.get("distance", 0)  # metros
-    duration = activity.get("moving_time", 0)  # segundos
+    distance = activity.get("distance", 0)        # metros
+    duration = activity.get("moving_time", 0)     # segundos (se guarda en segundos)
     speed = (distance / duration) if duration > 0 else 0  # m/s
 
-    # Cadencia promedio (Strava la da en pasos/min para running)
+    # Cadencia: Strava la da en pasos/min (un pie), multiplicamos x2 para ambos pies
     cadence = activity.get("average_cadence", 0) * 2 if activity.get("average_cadence") else 0
+
+    # Frecuencia cardíaca
+    heart_rate = activity.get("average_heartrate", 0) or 0.0
 
     return {
         "user_id": user_id,
         "date": activity.get("start_date_local", datetime.utcnow().isoformat()),
-        "duration": round(duration / 60, 2),  # convertir a minutos
+        "duration": round(duration, 2),           # segundos reales
+        "distance": round(distance, 2),           # metros
+        "heart_rate": round(heart_rate, 1),       # bpm
         "steps": int(cadence * (duration / 60)) if cadence > 0 else 0,
         "device": f"Strava - {activity.get('device_name', 'GPS')}",
         "speed": round(speed, 2),
@@ -96,7 +101,7 @@ def strava_activity_to_session(activity: dict, user_id: int) -> dict:
         "asymmetry": 0.0,
         "kli": 0.0,
         "kli_status": "OK",
-        "cumulative_load": round(distance / 1000, 2),  # km
+        "cumulative_load": round(distance / 1000, 2),  # km como carga acumulada
         "fatigue_slope": 0.0,
         "fi_times": "[]",
         "fi_values": "[]",
