@@ -1,7 +1,7 @@
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, ForeignKey
+import datetime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
 
 Base = declarative_base()
 
@@ -14,9 +14,10 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     full_name = Column(String, default="")
     hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     sessions = relationship("SessionRecord", back_populates="user")
+    strava_token = relationship("StravaToken", back_populates="user", uselist=False)
 
 
 class SessionRecord(Base):
@@ -46,6 +47,27 @@ class SessionRecord(Base):
     fi_times = Column(Text, default="[]")
     fi_values = Column(Text, default="[]")
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Strava (opcional)
+    strava_activity_id = Column(String, default="", nullable=True)
+    activity_name = Column(String, default="", nullable=True)
+    activity_type = Column(String, default="Run", nullable=True)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     user = relationship("User", back_populates="sessions")
+
+
+class StravaToken(Base):
+    __tablename__ = "strava_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    access_token = Column(String, nullable=False)
+    refresh_token = Column(String, default="")
+    expires_at = Column(BigInteger, default=0)
+    athlete_id = Column(String, default="")
+    athlete_name = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    user = relationship("User", back_populates="strava_token")
