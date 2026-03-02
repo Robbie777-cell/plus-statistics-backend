@@ -1,16 +1,19 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime, JSON, ForeignKey
+from sqlalchemy import Column, Integer, Float, String, DateTime, JSON, ForeignKey, Boolean
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from db.database import Base
 from datetime import datetime
+
+Base = declarative_base()
 
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    username = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     sessions = relationship("SessionRecord", back_populates="owner")
@@ -21,7 +24,7 @@ class SessionRecord(Base):
     __tablename__ = "sessions"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     date = Column(DateTime, default=datetime.utcnow)
     source = Column(String, default="manual")
 
