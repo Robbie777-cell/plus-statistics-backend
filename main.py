@@ -11,6 +11,7 @@ from db.database import create_tables
 from api.auth_routes import router as auth_router
 from api.session_routes import router as sessions_router
 from api.strava_routes import router as strava_router
+from api.admin_routes import router as admin_router
 
 app = FastAPI(
     title="+Statistics API",
@@ -33,6 +34,7 @@ def startup():
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(strava_router)
+app.include_router(admin_router)
 
 processor = SignalProcessor()
 analyzer = BiomechanicsAnalyzer()
