@@ -102,3 +102,13 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+def verify_token(token: str, db: Session) -> Optional[User]:
+    """Verifica un JWT y retorna el usuario. Usado para el callback de Strava."""
+    payload = decode_token(token)
+    if payload is None:
+        return None
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+    user = db.query(User).filter(User.id == int(user_id)).first() if str(user_id).isdigit() else get_user_by_email(db, user_id)
+    return user
