@@ -1,10 +1,9 @@
-import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, BigInteger
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Boolean
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+from datetime import datetime
 
 Base = declarative_base()
-
 
 class User(Base):
     __tablename__ = "users"
@@ -12,66 +11,49 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, unique=True, index=True, nullable=False)
-    full_name = Column(String, default="")
     hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    strava_token = Column(String, nullable=True)
+    strava_refresh_token = Column(String, nullable=True)
+    strava_athlete_id = Column(String, nullable=True)
 
-    sessions = relationship("SessionRecord", back_populates="user")
-    strava_token = relationship("StravaToken", back_populates="user", uselist=False)
+    sessions = relationship("Session", back_populates="owner")
 
 
-class SessionRecord(Base):
+class Session(Base):
     __tablename__ = "sessions"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    date = Column(String, default="")
-    duration = Column(Float, default=0.0)
-    steps = Column(Integer, default=0)
-    device = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    session_date = Column(DateTime, nullable=True)
+    device_position = Column(String, default="espalda")
+    source = Column(String, default="manual")  # manual, strava, demo
 
-    # Métricas biomecánicas
-    rei = Column(Float, default=0.0)
-    gss = Column(Float, default=0.0)
-    cadence = Column(Float, default=0.0)
-    asymmetry = Column(Float, default=0.0)
-    speed = Column(Float, default=0.0)
+    # Métricas principales
+    duration_minutes = Column(Float, nullable=True)
+    distance_km = Column(Float, nullable=True)
+    steps = Column(Integer, nullable=True)
+    cadence_avg = Column(Float, nullable=True)
+    velocity_avg = Column(Float, nullable=True)
+    ground_shock_avg = Column(Float, nullable=True)
+    asymmetry = Column(Float, nullable=True)
+    fatigue_index = Column(Float, nullable=True)
+    running_economy = Column(Float, nullable=True)
 
-    # Distancia y cardio (Strava)
-    distance = Column(Float, default=0.0, nullable=True)
-    heart_rate = Column(Float, default=0.0, nullable=True)
+    # KLI - Knee Load Index
+    kli = Column(Float, nullable=True)
+    kli_status = Column(String, nullable=True)
+    cumulative_load = Column(Float, nullable=True)
 
-    # KLI
-    kli = Column(Float, default=0.0)
-    kli_status = Column(String, default="OK")
-    cumulative_load = Column(Float, default=0.0)
+    # ML predictions
+    injury_risk = Column(Float, nullable=True)
+    injury_risk_level = Column(String, nullable=True)
+    optimal_pace = Column(Float, nullable=True)
+    recovery_days = Column(Integer, nullable=True)
 
-    # Fatiga
-    fatigue_slope = Column(Float, default=0.0)
-    fi_times = Column(Text, default="[]")
-    fi_values = Column(Text, default="[]")
+    # Raw data JSON para análisis futuro
+    raw_metrics = Column(JSON, nullable=True)
 
-    # Strava (opcional)
-    strava_activity_id = Column(String, default="", nullable=True)
-    activity_name = Column(String, default="", nullable=True)
-    activity_type = Column(String, default="Run", nullable=True)
-
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-    user = relationship("User", back_populates="sessions")
-
-
-class StravaToken(Base):
-    __tablename__ = "strava_tokens"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
-    access_token = Column(String, nullable=False)
-    refresh_token = Column(String, default="")
-    expires_at = Column(BigInteger, default=0)
-    athlete_id = Column(String, default="")
-    athlete_name = Column(String, default="")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-    user = relationship("User", back_populates="strava_token")
+    owner = relationship("User", back_populates="sessions")

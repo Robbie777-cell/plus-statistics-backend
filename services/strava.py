@@ -13,7 +13,6 @@ CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 
 
 def save_strava_token(db: Session, user_id: int, token_data: dict) -> None:
-    """Guarda o actualiza el token de Strava para un usuario."""
     existing = db.query(StravaToken).filter(StravaToken.user_id == user_id).first()
     if existing:
         existing.access_token = token_data["access_token"]
@@ -36,16 +35,13 @@ def save_strava_token(db: Session, user_id: int, token_data: dict) -> None:
 
 
 def get_strava_token(db: Session, user_id: int) -> StravaToken | None:
-    """Obtiene el token de Strava de un usuario."""
     return db.query(StravaToken).filter(StravaToken.user_id == user_id).first()
 
 
 async def refresh_access_token(db: Session, token: StravaToken) -> str:
-    """Refresca el access token si expiró."""
     import time
     if token.expires_at > int(time.time()) + 300:
         return token.access_token
-
     async with httpx.AsyncClient() as client:
         response = await client.post(STRAVA_TOKEN_URL, data={
             "client_id": CLIENT_ID,
@@ -62,7 +58,6 @@ async def refresh_access_token(db: Session, token: StravaToken) -> str:
 
 
 async def fetch_strava_activities(access_token: str, per_page: int = 30, page: int = 1) -> list:
-    """Obtiene actividades de Strava."""
     async with httpx.AsyncClient() as client:
         response = await client.get(
             STRAVA_ACTIVITIES_URL,
@@ -75,33 +70,33 @@ async def fetch_strava_activities(access_token: str, per_page: int = 30, page: i
 
 
 def strava_activity_to_session(activity: dict, user_id: int) -> dict:
-    """Convierte una actividad de Strava al formato SessionRecord."""
-    distance = activity.get("distance", 0)        # metros
-    duration = activity.get("moving_time", 0)     # segundos (se guarda en segundos)
-    speed = (distance / duration) if duration > 0 else 0  # m/s
-
-    # Cadencia: Strava la da en pasos/min (un pie), multiplicamos x2 para ambos pies
+    distance_m = activity.get("distance", 0)
+    distance_km = round(distance_m / 1000, 3)
+    duration = activity.get("moving_time", 0)
+    duration_minutes = round(duration / 60, 2)
+    speed = (distance_m / duration) if duration > 0 else 0
     cadence = activity.get("average_cadence", 0) * 2 if activity.get("average_cadence") else 0
-
-    # Frecuencia cardíaca
     heart_rate = activity.get("average_heartrate", 0) or 0.0
 
     return {
         "user_id": user_id,
         "date": activity.get("start_date_local", datetime.utcnow().isoformat()),
-        "duration": round(duration, 2),           # segundos reales
-        "distance": round(distance, 2),           # metros
-        "heart_rate": round(heart_rate, 1),       # bpm
+        "source": "strava",
+        "duration": round(duration, 2),
+        "duration_minutes": duration_minutes,
+        "distance_km": distance_km,
+        "heart_rate": round(heart_rate, 1),
         "steps": int(cadence * (duration / 60)) if cadence > 0 else 0,
         "device": f"Strava - {activity.get('device_name', 'GPS')}",
         "speed": round(speed, 2),
         "cadence": round(cadence, 1),
+        "cadence_avg": round(cadence, 1),
         "rei": 0.0,
         "gss": round(activity.get("average_speed", 0), 2),
         "asymmetry": 0.0,
         "kli": 0.0,
         "kli_status": "OK",
-        "cumulative_load": round(distance / 1000, 2),  # km como carga acumulada
+        "cumulative_load": distance_km,
         "fatigue_slope": 0.0,
         "fi_times": "[]",
         "fi_values": "[]",
