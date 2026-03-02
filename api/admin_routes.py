@@ -6,13 +6,22 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.post("/migrate-strava")
 def migrate_strava():
-    """Agrega columnas de Strava a la tabla sessions si no existen."""
+    """Agrega columnas necesarias a las tablas si no existen."""
     migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS strava_activity_id VARCHAR",
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS activity_name VARCHAR",
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS activity_type VARCHAR",
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-        "ALTER TABLE strava_tokens ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY" if False else "SELECT 1",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'manual'",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS duration FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS distance_km FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS heart_rate FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cadence FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device VARCHAR",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS fatigue_slope FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS rei FLOAT",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS gss FLOAT",
     ]
     results = []
     with engine.connect() as conn:
